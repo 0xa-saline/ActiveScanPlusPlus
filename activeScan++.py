@@ -105,7 +105,7 @@ class PerHostScans(IScannerCheck):
         '/.svn/entries': 'dir',
         '/server-status': 'Server uptime',
         '/.well-known/apple-app-site-association': 'applinks',
-        'crossdomain.xml':'<allow-access-from',
+        '/crossdomain.xml':'<allow-access-from',
         '/.idea/workspace.xml':'PROJECT_DIR'
     }
 
