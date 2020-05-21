@@ -22,6 +22,7 @@ try:
     import traceback
     from string import Template
     from cgi import escape
+    from hashlib import md5
 
     from burp import IBurpExtender, IScannerInsertionPointProvider, IScannerInsertionPoint, IParameter, IScannerCheck, \
         IScanIssue
@@ -29,7 +30,7 @@ try:
 except ImportError:
     print "Failed to load dependencies. This issue may be caused by using the unstable Jython 2.7 beta."
 
-VERSION = "1.0.21"
+VERSION = "1.0.22"
 FAST_MODE = False
 DEBUG = False
 callbacks = None
@@ -43,12 +44,17 @@ def safe_bytes_to_string(bytes):
 def html_encode(string):
     return string.replace("<", "&lt;").replace(">", "&gt;")
 
+def randmd5():
+    new_md5 = md5()
+    new_md5.update(str(random.randint(1,1000)))
+    return new_md5.hexdigest()
+
 class BurpExtender(IBurpExtender):
     def registerExtenderCallbacks(self, this_callbacks):
         global callbacks, helpers
         callbacks = this_callbacks
         helpers = callbacks.getHelpers()
-        callbacks.setExtensionName("activeScan++")
+        callbacks.setExtensionName("activeScan")
 
         # gracefully skip checks requiring Collaborator if it's disabled
         collab_enabled = True
@@ -57,6 +63,7 @@ class BurpExtender(IBurpExtender):
             print "Collaborator not enabled; skipping checks that require it"
         
         callbacks.registerScannerCheck(PerHostScans())
+        callbacks.registerScannerCheck(SpringbootScans())
         callbacks.registerScannerCheck(PerRequestScans())
 
         if not FAST_MODE:
@@ -95,8 +102,11 @@ class PerHostScans(IScannerCheck):
         # relative_url: vulnerable_response_content
 
         '/.git/config': '[core]',
+        '/.svn/entries': 'dir',
         '/server-status': 'Server uptime',
         '/.well-known/apple-app-site-association': 'applinks',
+        'crossdomain.xml':'<allow-access-from',
+        '/.idea/workspace.xml':'PROJECT_DIR'
     }
 
 
@@ -126,6 +136,72 @@ class PerHostScans(IScannerCheck):
         newReq = safe_bytes_to_string(basePair.getRequest()).replace(path, url, 1)
         return callbacks.makeHttpRequest(basePair.getHttpService(), newReq)
 
+class SpringbootScans(IScannerCheck):
+    scanned_hosts = set()
+
+    def doPassiveScan(self, basePair):
+        return []
+
+    def doActiveScan(self, basePair, insertionPoint):
+        host = basePair.getHttpService().getHost()
+        if host in self.scanned_hosts:
+            return []
+
+        self.scanned_hosts.add(host)
+        issues = []
+        issues.extend(self.interestingFileScan(basePair))
+        return issues
+
+    interestingFileMappings = {
+        # relative_url: vulnerable_response_content
+
+        '/env': 'applicationConfig',
+        '/trace': 'headers',
+        '/configprops': 'org.spring',
+        '/beans': 'org.spring',
+        '/health': 'description',
+        '/jolokia': 'protocol',
+        '/metrics': 'mem.free',
+        '/mappings': 'bean',
+        '/autoconfig': 'positiveMatches',
+        '/dump': 'threadName',
+        '/jolokia/list': 'springframework',
+        '/manager/health': 'description',
+        '/actuator/jolokia/list': 'springframework',
+    }
+
+
+    def interestingFileScan(self, basePair):
+        issues = []
+        for url, expect in self.interestingFileMappings.items():
+            attack = self.fetchURL(basePair, url)
+            if expect in safe_bytes_to_string(attack.getResponse()):
+                # prevent false positives by tweaking the URL and confirming the expected string goes away
+                baseline = self.fetchURL(basePair, url[:-1])
+                if expect not in safe_bytes_to_string(baseline.getResponse()):
+                    '''
+                    and (
+                    'Whitelabel Error Page'  in safe_bytes_to_string(baseline.getResponse()) or 
+                    '(type=Not Found, status=404)'  in safe_bytes_to_string(baseline.getResponse()) or 
+                    ' mapping for /error' in safe_bytes_to_string(baseline.getResponse()) or 
+                    'org.' in safe_bytes_to_string(baseline.getResponse()) or 
+                    'java.lang' in safe_bytes_to_string(baseline.getResponse())):
+                    '''
+                    issues.append(
+                        CustomScanIssue(basePair.getHttpService(), helpers.analyzeRequest(attack).getUrl(),
+                                        [attack, baseline],
+                                        'Spring boot info_leak',
+                                        "The info_leak to <b>"+html_encode(url)+"</b> contains <b>'"+html_encode(expect)+"'</b><br/><br/>This may be Spring boot.",
+                                        'Firm', 'High')
+                    )
+
+        return issues
+
+
+    def fetchURL(self, basePair, url):
+        path = helpers.analyzeRequest(basePair).getUrl().getPath()
+        newReq = safe_bytes_to_string(basePair.getRequest()).replace(path, url, 1)
+        return callbacks.makeHttpRequest(basePair.getHttpService(), newReq)
 
 
 class PerRequestScans(IScannerCheck):
@@ -135,6 +211,7 @@ class PerRequestScans(IScannerCheck):
             self.doHostHeaderScan,
             self.doCodePathScan,
             self.doStrutsScan,
+            self.doShiroScan,
             self.doStruts_2017_9805_Scan,
             self.doStruts_2018_11776_Scan,
             self.doXXEPostScan,
@@ -220,6 +297,21 @@ class PerRequestScans(IScannerCheck):
                 [attack],
                 'Struts2 RCE',
                 "The application appears to be vulnerable to CVE-2017-5638, enabling arbitrary code execution.",
+                'Firm', 'High')]
+
+        return []
+
+    def doShiroScan(self, basePair):
+
+        hashstr = randmd5()
+        (ignore, req) = setHeader(basePair.getRequest(), 'Cookie', "rememberMe="+hashstr, True)
+        attack = callbacks.makeHttpRequest(basePair.getHttpService(), req)
+
+        if 'rememberMe' in '\n'.join(helpers.analyzeResponse(attack.getResponse()).getHeaders()):
+            return [CustomScanIssue(basePair.getHttpService(), helpers.analyzeRequest(basePair).getUrl(),
+                [attack],
+                'Found Shiro Module',
+                "The application appears to be vulnerable to Shiro, may it have code execution.",
                 'Firm', 'High')]
 
         return []
