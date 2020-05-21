@@ -38,6 +38,7 @@ The host header checks tamper with the host header, which may result in requests
 **1.0.22 20200520**
   - Shiro found
   - spring boot Found
+  - CVE-2018-1000130
 
 **1.0.21 20190322**
   - Detect Rails file disclosure (CVE-2019-5418)
